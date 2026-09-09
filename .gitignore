@@ -1,0 +1,58 @@
+# Go build and test artifacts
+courier-service
+courier-client
+/bin/
+/build/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Go workspace and local tooling
+vendor/
+go.work
+go.work.sum
+
+# IDE and editor settings
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+*~
+
+# Operating system files
+.DS_Store
+Thumbs.db
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.local
+*.secret
+
+# AI assistant and agent files
+.copilot/
+.github/copilot-instructions.md
+.github/agents/
+.github/prompts/
+.github/skills/
+.agents/
+AGENTS.md
+task*.md
+*.agent.md
+*.prompt.md
+*.instructions.md
+
+# Local runtime data and logs
+*.log
+logs/
+.tmp/
+tmp/

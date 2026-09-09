@@ -1,0 +1,49 @@
+services:
+  redis:
+    image: redis:alpine
+    container_name: courier-redis
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - courier-net
+    restart: unless-stopped
+
+  courier-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: courier-location-service
+    ports:
+      - "8080:8080"
+    environment:
+      - SERVER_PORT=8080
+      - REDIS_ADDR=redis:6379
+      - ORDERS_FILE_PATH=orders.yml
+      - POLL_INTERVAL=30s
+      - WORKER_CONCURRENCY=10
+      - SLA_LIMIT=100ms
+      - LOCATION_TTL=120s
+      - ORDER_COURIER_MAPPING_TTL=1h
+      - HEARTBEAT_TTL=90s
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - courier-net
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+    driver: local
+
+networks:
+  courier-net:
+    driver: bridge
