@@ -1,4 +1,8 @@
 // Package http provides HTTP handlers and routing for the REST API.
+//
+// Роль пакета в системе:
+// Принимает входящие сетевые HTTP-запросы клиентов (REST API), валидирует параметры,
+// делегирует выполнение LocationService и HealthHandler, и формирует JSON-ответы.
 package http
 
 import (
@@ -11,23 +15,30 @@ import (
 	"courier-service/internal/service"
 )
 
-// LocationHandler handles HTTP requests for courier location tracking.
+// LocationHandler обрабатывает клиентские запросы получения геопозиции курьера.
+// Зависит от LocationService (слой бизнес-логики).
 type LocationHandler struct {
 	locationService service.LocationService
 }
 
-// NewLocationHandler creates a new LocationHandler.
+// NewLocationHandler создает экземпляр LocationHandler с внедренным LocationService.
 func NewLocationHandler(locationService service.LocationService) *LocationHandler {
 	return &LocationHandler{
 		locationService: locationService,
 	}
 }
 
-// GetCourierLocation handles GET /orders/{orderId}/courier-location.
-// Adheres strictly to the SLA < 100ms requirement:
-// - Cache Hit: returns HTTP 200 OK with location (~2ms).
-// - Cache Miss: returns HTTP 202 Accepted with Retry-After: 1 header (~2ms) and initiates async tracking.
+// GetCourierLocation обрабатывает эндпоинт GET /orders/{orderId}/courier-location.
+//
+// Строго соблюдает SLA < 100 мс:
+// 1. Быстрый путь (Cache Hit): координаты уже в Redis.
+//    Возвращает HTTP 200 OK + JSON (~1.6 мкс).
+// 2. Холодный старт (Cache Miss): данных в Redis еще нет.
+//    Не ждет 700 мс синхронных апстримов! Мгновенно возвращает HTTP 202 Accepted
+//    с заголовком Retry-After: 1, инициируя асинхронный фоновый прогрев в воркере.
+// 3. Некорректный ID заказа: возвращает HTTP 400 Bad Request.
 func (h *LocationHandler) GetCourierLocation(w http.ResponseWriter, r *http.Request) {
+	// 1. Извлечение и валидация параметра пути orderId (Go 1.22+ PathValue)
 	orderIDStr := r.PathValue("orderId")
 	orderID, err := strconv.ParseInt(orderIDStr, 10, 64)
 	if err != nil || orderID <= 0 {
@@ -39,6 +50,7 @@ func (h *LocationHandler) GetCourierLocation(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// 2. Обращение к сервису чтения O(1)
 	location, found, err := h.locationService.GetCourierLocation(r.Context(), orderID)
 	if err != nil {
 		slog.Error("Failed to get courier location",
@@ -56,8 +68,9 @@ func (h *LocationHandler) GetCourierLocation(w http.ResponseWriter, r *http.Requ
 
 	w.Header().Set("Content-Type", "application/json")
 
+	// 3. Ветвление: Cache Miss -> 202 Accepted (неблокирующий ответ)
 	if !found {
-		// Cache Miss: inform client to retry shortly while background poller warms the cache
+		// Клиенту предлагается повторить запрос через 1 секунду, когда воркер согреет кэш
 		w.Header().Set("Retry-After", "1")
 		w.WriteHeader(http.StatusAccepted)
 		_ = json.NewEncoder(w).Encode(domain.TrackingResponse{
@@ -67,7 +80,7 @@ func (h *LocationHandler) GetCourierLocation(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Cache Hit: coordinates ready
+	// 4. Ветвление: Cache Hit -> 200 OK (координаты курьера готовы)
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(location)
 }

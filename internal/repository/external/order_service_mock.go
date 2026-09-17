@@ -3,7 +3,9 @@ package external
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math/rand"
 	"os"
 	"sync"
 	"time"
@@ -13,12 +15,18 @@ import (
 	"courier-service/internal/domain"
 )
 
-// OrderServiceMock emulates the external Order Service with a fixed 200ms delay.
+// ErrOrderServiceSimulatedFailure is returned when chaos injection triggers an error.
+var ErrOrderServiceSimulatedFailure = errors.New("simulated order service 500 internal server error")
+
+// OrderServiceMock emulates the external Order Service with a configurable delay and chaos injection.
 // It loads order mappings from orders.yml into an in-memory database.
 type OrderServiceMock struct {
-	mu     sync.RWMutex
-	orders map[int64]*domain.Order
-	delay  time.Duration
+	mu        sync.RWMutex
+	orders    map[int64]*domain.Order
+	delay     time.Duration
+	errorRate float64
+	jitter    time.Duration
+	rng       *rand.Rand
 }
 
 type ordersFile struct {
@@ -52,6 +60,7 @@ func NewOrderServiceMock(filePath string) (*OrderServiceMock, error) {
 	return &OrderServiceMock{
 		orders: ordersMap,
 		delay:  200 * time.Millisecond,
+		rng:    rand.New(rand.NewSource(time.Now().UnixNano())),
 	}, nil
 }
 
@@ -65,13 +74,39 @@ func NewOrderServiceMockFromOrders(orders []domain.Order, delay time.Duration) *
 	return &OrderServiceMock{
 		orders: ordersMap,
 		delay:  delay,
+		rng:    rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 }
 
-// GetOrderByID retrieves an order and its assigned courier, simulating 200ms latency.
+// SetChaosParams configures failure rate and latency jitter for resilience testing.
+func (m *OrderServiceMock) SetChaosParams(errorRate float64, jitter time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.errorRate = errorRate
+	m.jitter = jitter
+}
+
+// GetOrderByID retrieves an order and its assigned courier, simulating latency and chaos injection.
 func (m *OrderServiceMock) GetOrderByID(ctx context.Context, orderID int64) (*domain.Order, error) {
-	if m.delay > 0 {
-		timer := time.NewTimer(m.delay)
+	m.mu.Lock()
+	errRate := m.errorRate
+	jitter := m.jitter
+	delay := m.delay
+	var shouldFail bool
+	if errRate > 0 && m.rng.Float64() < errRate {
+		shouldFail = true
+	}
+	if jitter > 0 {
+		jitterOffset := time.Duration((m.rng.Float64()*2 - 1) * float64(jitter))
+		delay += jitterOffset
+		if delay < 0 {
+			delay = 0
+		}
+	}
+	m.mu.Unlock()
+
+	if delay > 0 {
+		timer := time.NewTimer(delay)
 		defer timer.Stop()
 
 		select {
@@ -79,6 +114,10 @@ func (m *OrderServiceMock) GetOrderByID(ctx context.Context, orderID int64) (*do
 			return nil, fmt.Errorf("order service context canceled: %w", ctx.Err())
 		case <-timer.C:
 		}
+	}
+
+	if shouldFail {
+		return nil, ErrOrderServiceSimulatedFailure
 	}
 
 	m.mu.RLock()

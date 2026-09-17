@@ -3,6 +3,7 @@ package external
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"sync"
@@ -11,12 +12,17 @@ import (
 	"courier-service/internal/domain"
 )
 
-// CourierServiceMock emulates the external Courier Service with a 500ms delay.
+// ErrCourierServiceSimulatedTimeout is returned when chaos injection simulates a timeout.
+var ErrCourierServiceSimulatedTimeout = errors.New("simulated courier service timeout")
+
+// CourierServiceMock emulates the external Courier Service with a 500ms delay and chaos injection.
 // It generates realistic geographic coordinates for a given courier.
 type CourierServiceMock struct {
-	mu    sync.Mutex
-	rng   *rand.Rand
-	delay time.Duration
+	mu          sync.Mutex
+	rng         *rand.Rand
+	delay       time.Duration
+	timeoutRate float64
+	jitter      time.Duration
 }
 
 // NewCourierServiceMock creates a new CourierServiceMock with default 500ms delay.
@@ -35,10 +41,45 @@ func NewCourierServiceMockWithDelay(delay time.Duration) *CourierServiceMock {
 	}
 }
 
-// GetCourierLocation retrieves coordinates for the requested courier, simulating 500ms latency.
+// SetChaosParams configures timeout simulation rate and latency jitter for resilience testing.
+func (m *CourierServiceMock) SetChaosParams(timeoutRate float64, jitter time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.timeoutRate = timeoutRate
+	m.jitter = jitter
+}
+
+// GetCourierLocation retrieves coordinates for the requested courier, simulating latency and chaos injection.
 func (m *CourierServiceMock) GetCourierLocation(ctx context.Context, courierID int64) (*domain.Coordinates, error) {
-	if m.delay > 0 {
-		timer := time.NewTimer(m.delay)
+	m.mu.Lock()
+	timeoutRate := m.timeoutRate
+	jitter := m.jitter
+	delay := m.delay
+	var shouldTimeout bool
+	if timeoutRate > 0 && m.rng.Float64() < timeoutRate {
+		shouldTimeout = true
+	}
+	if jitter > 0 {
+		jitterOffset := time.Duration((m.rng.Float64()*2 - 1) * float64(jitter))
+		delay += jitterOffset
+		if delay < 0 {
+			delay = 0
+		}
+	}
+	m.mu.Unlock()
+
+	if shouldTimeout {
+		// Simulate network timeout or hanging upstream
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("%w: %v", ErrCourierServiceSimulatedTimeout, ctx.Err())
+		case <-time.After(2 * time.Second):
+			return nil, ErrCourierServiceSimulatedTimeout
+		}
+	}
+
+	if delay > 0 {
+		timer := time.NewTimer(delay)
 		defer timer.Stop()
 
 		select {

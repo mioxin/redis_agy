@@ -34,4 +34,10 @@ type LocationCacheRepository interface {
 	Ping(ctx context.Context) error
 	SetLastSync(ctx context.Context, timestamp time.Time) error
 	GetLastSync(ctx context.Context) (time.Time, error)
+
+	// Distributed Leader Election (P3)
+	AcquireLeaderLock(ctx context.Context, key string, instanceID string, ttl time.Duration) (bool, error)
+	RenewLeaderLock(ctx context.Context, key string, instanceID string, ttl time.Duration) (bool, error)
+	ReleaseLeaderLock(ctx context.Context, key string, instanceID string) error
 }
+

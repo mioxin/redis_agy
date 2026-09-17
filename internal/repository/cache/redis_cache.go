@@ -14,6 +14,12 @@ import (
 	"courier-service/internal/domain"
 )
 
+// Redis key patterns and data structures:
+// 1. "order:%d:location"   (String, JSON, TTL=10s) : Cached courier coordinates for an order (O(1) read).
+// 2. "order:%d:courier_id" (String, int64, TTL=24h): Order -> Courier ID mapping cache.
+// 3. "tracking:active_orders" (Set of order IDs)  : List of orders currently being polled by PollerWorker.
+// 4. "tracking:order:%d:heartbeat" (String, TTL=90s): Sliding-window heartbeat; when expired, order is purged from active set.
+// 5. "courier_poller:last_sync" (String, RFC3339) : Global timestamp of the last successful batch polling cycle.
 const (
 	keyPrefixLocation  = "order:%d:location"
 	keyPrefixCourier   = "order:%d:courier_id"
@@ -23,6 +29,8 @@ const (
 )
 
 // RedisCacheRepository implements LocationCacheRepository using Redis.
+// It serves as the single source of truth for hot data reads (Read Path)
+// and handles distributed lock synchronization for multi-replica deployments.
 type RedisCacheRepository struct {
 	client redis.UniversalClient
 }
@@ -69,6 +77,8 @@ func (r *RedisCacheRepository) SetOrderLocation(ctx context.Context, location do
 }
 
 // SetOrderLocationsBatch saves multiple locations to Redis in a single pipeline.
+// Using Redis Pipelining batches all network roundtrips into 1 socket write/read,
+// keeping sync cycle overhead minimal even with hundreds of active orders.
 func (r *RedisCacheRepository) SetOrderLocationsBatch(ctx context.Context, locations []domain.CourierLocation, ttl time.Duration) error {
 	if len(locations) == 0 {
 		return nil
@@ -120,6 +130,8 @@ func (r *RedisCacheRepository) SetOrderCourierMapping(ctx context.Context, order
 }
 
 // RegisterActiveOrder adds the order to the active tracking set and initializes its heartbeat TTL.
+// Both operations are performed atomically in a pipeline so an order in the active set
+// always has an initial heartbeat.
 func (r *RedisCacheRepository) RegisterActiveOrder(ctx context.Context, orderID int64, heartbeatTTL time.Duration) error {
 	pipe := r.client.Pipeline()
 	pipe.SAdd(ctx, keyActiveOrders, orderID)
@@ -152,6 +164,8 @@ func (r *RedisCacheRepository) GetActiveOrderIDs(ctx context.Context) ([]int64, 
 }
 
 // RefreshOrderHeartbeat extends the heartbeat expiration for an active order.
+// This is triggered on every user read request (LocationService.GetCourierLocation),
+// extending active polling as long as clients are watching the order.
 func (r *RedisCacheRepository) RefreshOrderHeartbeat(ctx context.Context, orderID int64, heartbeatTTL time.Duration) error {
 	heartbeatKey := fmt.Sprintf(keyOrderHeartbeat, orderID)
 	if err := r.client.Set(ctx, heartbeatKey, "1", heartbeatTTL).Err(); err != nil {
@@ -160,7 +174,11 @@ func (r *RedisCacheRepository) RefreshOrderHeartbeat(ctx context.Context, orderI
 	return nil
 }
 
-// RemoveInactiveOrders removes orders from active tracking whose heartbeat has expired.
+// RemoveInactiveOrders cleans up the active tracking set by removing orders whose heartbeat key has expired.
+// Flow:
+// 1. Fetch all active order IDs via SMEMBERS.
+// 2. Batch check existence of their heartbeat keys using a pipeline of EXISTS commands.
+// 3. Remove all expired IDs in a single SREM call.
 func (r *RedisCacheRepository) RemoveInactiveOrders(ctx context.Context) error {
 	members, err := r.client.SMembers(ctx, keyActiveOrders).Result()
 	if err != nil {
@@ -238,3 +256,55 @@ func (r *RedisCacheRepository) GetLastSync(ctx context.Context) (time.Time, erro
 
 	return t, nil
 }
+
+// AcquireLeaderLock attempts to acquire the distributed leader lock atomically using SET NX EX.
+// Only one service instance succeeds, becoming the elected leader responsible for running
+// periodic external background sync cycles.
+func (r *RedisCacheRepository) AcquireLeaderLock(ctx context.Context, key string, instanceID string, ttl time.Duration) (bool, error) {
+	res, err := r.client.SetArgs(ctx, key, instanceID, redis.SetArgs{
+		Mode: "NX",
+		TTL:  ttl,
+	}).Result()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return false, nil
+		}
+		return false, fmt.Errorf("acquire leader lock %q: %w", key, err)
+	}
+	return res == "OK", nil
+}
+
+// RenewLeaderLock extends the TTL of the leader lock if it is currently held by instanceID.
+// Executes an atomic Lua script to prevent accidentally renewing a lock that was lost or stolen.
+func (r *RedisCacheRepository) RenewLeaderLock(ctx context.Context, key string, instanceID string, ttl time.Duration) (bool, error) {
+	const renewScript = `
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+    return redis.call("PEXPIRE", KEYS[1], ARGV[2])
+else
+    return 0
+end`
+
+	ttlMs := int64(ttl / time.Millisecond)
+	res, err := r.client.Eval(ctx, renewScript, []string{key}, instanceID, ttlMs).Int64()
+	if err != nil {
+		return false, fmt.Errorf("renew leader lock %q: %w", key, err)
+	}
+	return res == 1, nil
+}
+
+// ReleaseLeaderLock atomically releases the leader lock if held by instanceID.
+// Executes an atomic Lua script to avoid deleting another replica's lock if the lease had expired.
+func (r *RedisCacheRepository) ReleaseLeaderLock(ctx context.Context, key string, instanceID string) error {
+	const releaseScript = `
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+    return redis.call("DEL", KEYS[1])
+else
+    return 0
+end`
+
+	if err := r.client.Eval(ctx, releaseScript, []string{key}, instanceID).Err(); err != nil {
+		return fmt.Errorf("release leader lock %q: %w", key, err)
+	}
+	return nil
+}
+

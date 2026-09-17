@@ -21,6 +21,11 @@ func (i memoryItem) isExpired() bool {
 	return time.Now().After(i.expiresAt)
 }
 
+type memoryLock struct {
+	owner     string
+	expiresAt time.Time
+}
+
 // MemoryCacheRepository provides a thread-safe in-memory implementation of LocationCacheRepository.
 // Useful for integration testing and standalone benchmarking.
 type MemoryCacheRepository struct {
@@ -29,6 +34,7 @@ type MemoryCacheRepository struct {
 	courierMaps  map[int64]memoryItem
 	activeOrders map[int64]time.Time // orderID -> heartbeat expiresAt
 	lastSync     time.Time
+	leaderLocks  map[string]memoryLock
 }
 
 // NewMemoryCacheRepository initializes a new MemoryCacheRepository.
@@ -37,8 +43,10 @@ func NewMemoryCacheRepository() *MemoryCacheRepository {
 		locations:    make(map[int64]memoryItem),
 		courierMaps:  make(map[int64]memoryItem),
 		activeOrders: make(map[int64]time.Time),
+		leaderLocks:  make(map[string]memoryLock),
 	}
 }
+
 
 // GetOrderLocation returns cached courier location if present and not expired.
 func (m *MemoryCacheRepository) GetOrderLocation(ctx context.Context, orderID int64) (*domain.CourierLocation, error) {
@@ -185,3 +193,64 @@ func (m *MemoryCacheRepository) GetLastSync(ctx context.Context) (time.Time, err
 
 	return m.lastSync, nil
 }
+
+// AcquireLeaderLock attempts to acquire leader lock in memory.
+func (m *MemoryCacheRepository) AcquireLeaderLock(ctx context.Context, key string, instanceID string, ttl time.Duration) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	now := time.Now()
+	lock, exists := m.leaderLocks[key]
+	if !exists || now.After(lock.expiresAt) {
+		m.leaderLocks[key] = memoryLock{
+			owner:     instanceID,
+			expiresAt: now.Add(ttl),
+		}
+		return true, nil
+	}
+
+	if lock.owner == instanceID {
+		m.leaderLocks[key] = memoryLock{
+			owner:     instanceID,
+			expiresAt: now.Add(ttl),
+		}
+		return true, nil
+	}
+
+	return false, nil
+}
+
+// RenewLeaderLock extends leader lock expiration if owned by instanceID.
+func (m *MemoryCacheRepository) RenewLeaderLock(ctx context.Context, key string, instanceID string, ttl time.Duration) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	now := time.Now()
+	lock, exists := m.leaderLocks[key]
+	if !exists || now.After(lock.expiresAt) {
+		return false, nil
+	}
+
+	if lock.owner == instanceID {
+		m.leaderLocks[key] = memoryLock{
+			owner:     instanceID,
+			expiresAt: now.Add(ttl),
+		}
+		return true, nil
+	}
+
+	return false, nil
+}
+
+// ReleaseLeaderLock releases leader lock if owned by instanceID.
+func (m *MemoryCacheRepository) ReleaseLeaderLock(ctx context.Context, key string, instanceID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	lock, exists := m.leaderLocks[key]
+	if exists && lock.owner == instanceID {
+		delete(m.leaderLocks, key)
+	}
+	return nil
+}
+

@@ -2,6 +2,7 @@ package service_test
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -102,3 +103,69 @@ func TestPollerService_SyncActiveOrders(t *testing.T) {
 		t.Fatalf("expected valid last sync timestamp: %v", err)
 	}
 }
+
+type countingOrderClient struct {
+	mu        sync.Mutex
+	callCount int
+	delay     time.Duration
+}
+
+func (c *countingOrderClient) GetOrderByID(ctx context.Context, orderID int64) (*domain.Order, error) {
+	if c.delay > 0 {
+		time.Sleep(c.delay)
+	}
+	c.mu.Lock()
+	c.callCount++
+	c.mu.Unlock()
+	return &domain.Order{ID: orderID, CourierID: 777}, nil
+}
+
+func (c *countingOrderClient) Calls() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.callCount
+}
+
+func TestPollerService_Singleflight_CacheStampedeProtection(t *testing.T) {
+	cfg := &config.Config{
+		LocationTTL:            120 * time.Second,
+		OrderCourierMappingTTL: 1 * time.Hour,
+		UrgentQueueSize:        100,
+		WorkerConcurrency:      10,
+	}
+
+	countingClient := &countingOrderClient{delay: 20 * time.Millisecond}
+	courierMock := external.NewCourierServiceMockWithDelay(10 * time.Millisecond)
+	memCache := cache.NewMemoryCacheRepository()
+
+	poller := service.NewPollerService(memCache, countingClient, courierMock, cfg)
+
+	const concurrency = 50
+	var wg sync.WaitGroup
+	errs := make(chan error, concurrency)
+
+	// Launch 50 concurrent requests simultaneously for the same order ID
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			err := poller.SyncOrder(context.Background(), 999)
+			if err != nil {
+				errs <- err
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		t.Fatalf("concurrent sync failed: %v", err)
+	}
+
+	// Verify that countingOrderClient was invoked exactly 1 time despite 50 concurrent requests
+	if countingClient.Calls() != 1 {
+		t.Fatalf("expected GetOrderByID to be called strictly 1 time due to singleflight deduplication, got: %d", countingClient.Calls())
+	}
+}
+

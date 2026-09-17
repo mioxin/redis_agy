@@ -31,7 +31,8 @@ type HealthCheckResponse struct {
 	UptimeSeconds float64 `json:"uptime_seconds"`
 }
 
-// HealthCheck handles GET /health.
+// HealthCheck handles GET /health and GET /healthz (full status diagnostic).
+// Returns 200 OK if Redis is connected, or 503 Service Unavailable if Redis is unreachable.
 func (h *HealthHandler) HealthCheck(w http.ResponseWriter, r *http.Request) {
 	redisStatus := "connected"
 	if err := h.cacheRepo.Ping(r.Context()); err != nil {
@@ -59,3 +60,37 @@ func (h *HealthHandler) HealthCheck(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.NewEncoder(w).Encode(resp)
 }
+
+// LivenessCheck handles GET /health/live (Kubernetes liveness probe).
+// Returns 200 OK as long as the application process is running and its HTTP loop is not deadlocked.
+// If this probe fails consecutively, Kubernetes restarts the pod container.
+func (h *HealthHandler) LivenessCheck(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":         "alive",
+		"uptime_seconds": time.Since(h.startTime).Seconds(),
+	})
+}
+
+// ReadinessCheck handles GET /health/ready (Kubernetes readiness probe).
+// Verifies connectivity to the required Redis cache dependency.
+// If Redis is unreachable, returns 503 Service Unavailable, signaling Kubernetes Service / Ingress
+// to temporarily remove this pod from traffic routing until connectivity recovers.
+func (h *HealthHandler) ReadinessCheck(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if err := h.cacheRepo.Ping(r.Context()); err != nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"status": "not ready",
+			"error":  err.Error(),
+		})
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"status": "ready",
+	})
+}
+

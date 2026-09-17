@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+
+	"courier-service/internal/telemetry"
 )
 
 type responseWriterWrapper struct {
@@ -30,14 +32,20 @@ func (rw *responseWriterWrapper) WriteHeader(code int) {
 }
 
 // LatencyLogger creates a middleware that calculates request latency, sets X-Response-Time header,
-// and audits adherence to the SLA threshold (< 100ms).
+// records Prometheus metrics, and audits adherence to the SLA threshold (< 100ms).
+//
+// SLA Monitoring Mechanism:
+// - Measures total elapsed time from handler entry to exit using time.Since(start).
+// - Attaches "X-Response-Time: X.XXms" HTTP response header for client-side observability.
+// - Increments telemetry.RecordHTTPRequest (Prometheus histogram & request counter).
+// - If duration > slaLimit, fires a structured Warn log [SLA BREACH] and records telemetry.RecordSLABreach().
 func LatencyLogger(slaLimit time.Duration) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
 			wrapped := newResponseWriterWrapper(w)
 
-			// Execute request handler
+			// Execute downstream request handler
 			next.ServeHTTP(wrapped, r)
 
 			duration := time.Since(start)
@@ -46,9 +54,15 @@ func LatencyLogger(slaLimit time.Duration) func(http.Handler) http.Handler {
 			// Expose latency header to client
 			w.Header().Set("X-Response-Time", fmt.Sprintf("%.2fms", durationMs))
 
+			// Record Prometheus metrics
+			telemetry.RecordHTTPRequest(r.Method, r.URL.Path, wrapped.statusCode, duration)
+
+			logger := telemetry.LoggerWithTrace(r.Context())
+
 			// SLA audit check (< 100ms)
 			if duration > slaLimit {
-				slog.Warn("[SLA BREACH]",
+				telemetry.RecordSLABreach()
+				logger.Warn("[SLA BREACH]",
 					slog.String("method", r.Method),
 					slog.String("path", r.URL.Path),
 					slog.Int("status", wrapped.statusCode),
@@ -56,7 +70,7 @@ func LatencyLogger(slaLimit time.Duration) func(http.Handler) http.Handler {
 					slog.Float64("sla_threshold_ms", float64(slaLimit.Milliseconds())),
 				)
 			} else {
-				slog.Debug("[SLA OK]",
+				logger.Debug("[SLA OK]",
 					slog.String("method", r.Method),
 					slog.String("path", r.URL.Path),
 					slog.Int("status", wrapped.statusCode),
@@ -66,3 +80,4 @@ func LatencyLogger(slaLimit time.Duration) func(http.Handler) http.Handler {
 		})
 	}
 }
+
