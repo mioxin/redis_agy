@@ -120,10 +120,85 @@ func (c *countingOrderClient) GetOrderByID(ctx context.Context, orderID int64) (
 	return &domain.Order{ID: orderID, CourierID: 777}, nil
 }
 
+func (c *countingOrderClient) GetAllOrders() []domain.Order {
+	return nil
+}
+
 func (c *countingOrderClient) Calls() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.callCount
+}
+
+func TestPollerService_PreWarmCache(t *testing.T) {
+	cfg := &config.Config{
+		LocationTTL:            120 * time.Second,
+		OrderCourierMappingTTL: 1 * time.Hour,
+		HeartbeatTTL:           90 * time.Second,
+		WorkerConcurrency:      5,
+		UrgentQueueSize:        10,
+	}
+
+	orders := []domain.Order{
+		{ID: 1, CourierID: 101},
+		{ID: 2, CourierID: 101},
+		{ID: 3, CourierID: 102},
+	}
+	orderMock := external.NewOrderServiceMockFromOrders(orders, 0)
+	cbOrderMock := external.NewCircuitBreakerOrderService(orderMock, 3, 1*time.Second)
+	courierMock := external.NewCourierServiceMockWithDelay(0)
+	memCache := cache.NewMemoryCacheRepository()
+
+	poller := service.NewPollerService(memCache, cbOrderMock, courierMock, cfg)
+	ctx := context.Background()
+
+	err := poller.PreWarmCache(ctx)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+
+	// Verify all orders are in active_orders set
+	activeIDs, err := memCache.GetActiveOrderIDs(ctx)
+	if err != nil {
+		t.Fatalf("failed to get active order ids: %v", err)
+	}
+	if len(activeIDs) != len(orders) {
+		t.Fatalf("expected %d active orders, got: %d", len(orders), len(activeIDs))
+	}
+	orderSet := make(map[int64]bool, len(orders))
+	for _, id := range activeIDs {
+		orderSet[id] = true
+	}
+	for _, o := range orders {
+		if !orderSet[o.ID] {
+			t.Fatalf("expected order %d in active_orders, not found", o.ID)
+		}
+	}
+
+	// Verify all order->courier mappings are cached
+	for _, o := range orders {
+		courierID, err := memCache.GetOrderCourierMapping(ctx, o.ID)
+		if err != nil {
+			t.Fatalf("expected courier mapping for order %d: %v", o.ID, err)
+		}
+		if courierID != o.CourierID {
+			t.Fatalf("expected courier %d for order %d, got %d", o.CourierID, o.ID, courierID)
+		}
+	}
+
+	// Verify all locations are cached
+	for _, o := range orders {
+		loc, err := memCache.GetOrderLocation(ctx, o.ID)
+		if err != nil {
+			t.Fatalf("expected location for order %d: %v", o.ID, err)
+		}
+		if loc.OrderID != o.ID {
+			t.Fatalf("expected order %d, got %d", o.ID, loc.OrderID)
+		}
+		if loc.CourierID != o.CourierID {
+			t.Fatalf("expected courier %d, got %d", o.CourierID, loc.CourierID)
+		}
+	}
 }
 
 func TestPollerService_Singleflight_CacheStampedeProtection(t *testing.T) {

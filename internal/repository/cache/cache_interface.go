@@ -39,5 +39,15 @@ type LocationCacheRepository interface {
 	AcquireLeaderLock(ctx context.Context, key string, instanceID string, ttl time.Duration) (bool, error)
 	RenewLeaderLock(ctx context.Context, key string, instanceID string, ttl time.Duration) (bool, error)
 	ReleaseLeaderLock(ctx context.Context, key string, instanceID string) error
+
+	// Cache Pre-Warming (ADR-002)
+	// PreWarmOrders atomically registers a batch of orders in the active tracking set,
+	// initializes their heartbeats, and caches order->courier mappings in a single pipeline.
+	PreWarmOrders(ctx context.Context, orders []domain.Order, heartbeatTTL time.Duration, mappingTTL time.Duration) error
+
+	// SetPreWarmed/IsPreWarmed coordinate multi-pod startup so only the first replica
+	// executes pre-warming. Flag is test-only; not needed in production.
+	SetPreWarmed(ctx context.Context) error
+	IsPreWarmed(ctx context.Context) (bool, error)
 }
 

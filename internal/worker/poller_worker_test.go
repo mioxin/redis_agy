@@ -46,6 +46,10 @@ func (m *mockPollerService) SyncActiveOrders(ctx context.Context) error {
 	return nil
 }
 
+func (m *mockPollerService) PreWarmCache(ctx context.Context) error {
+	return nil
+}
+
 func TestPollerWorker_StartAndStop(t *testing.T) {
 	cfg := &config.Config{
 		PollInterval:        50 * time.Millisecond,

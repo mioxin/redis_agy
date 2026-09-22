@@ -37,6 +37,10 @@ func (d *dummyPollerService) SyncActiveOrders(ctx context.Context) error {
 	return nil
 }
 
+func (d *dummyPollerService) PreWarmCache(ctx context.Context) error {
+	return nil
+}
+
 func TestLocationService_GetCourierLocation(t *testing.T) {
 	cfg := &config.Config{
 		HeartbeatTTL: 90 * time.Second,

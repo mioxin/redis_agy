@@ -4,6 +4,7 @@ courier-client
 /bin/
 /build/
 /dist/
+/out/
 *.exe
 *.exe~
 *.dll
@@ -56,3 +57,4 @@ task*.md
 logs/
 .tmp/
 tmp/
+workflow_adr002.md

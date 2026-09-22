@@ -12,6 +12,8 @@ import (
 type OrderServiceClient interface {
 	// GetOrderByID retrieves an order and its assigned courier by ID.
 	GetOrderByID(ctx context.Context, orderID int64) (*domain.Order, error)
+	// GetAllOrders returns all known orders for cache pre-warming at startup.
+	GetAllOrders() []domain.Order
 }
 
 // CourierServiceClient defines the interface for interacting with the external Courier Service.

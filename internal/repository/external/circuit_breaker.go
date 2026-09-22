@@ -124,3 +124,9 @@ func (c *CircuitBreakerCourierService) GetCourierLocation(ctx context.Context, c
 	}
 	return res, nil
 }
+
+// GetAllOrders delegates to the underlying OrderServiceClient, returning all known orders.
+// Used for cache pre-warming at startup; not protected by the circuit breaker (local data only).
+func (c *CircuitBreakerOrderService) GetAllOrders() []domain.Order {
+	return c.underlying.GetAllOrders()
+}

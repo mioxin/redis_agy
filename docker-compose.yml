@@ -16,42 +16,80 @@ services:
       - courier-net
     restart: unless-stopped
 
-  courier-service:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: courier-location-service
-    ports:
-      - "8080:8080"
-    environment:
-      - SERVER_PORT=8080
-      - REDIS_ADDR=redis:6379
-      - ORDERS_FILE_PATH=orders.yml
-      - POLL_INTERVAL=30s
-      - WORKER_CONCURRENCY=10
-      - SLA_LIMIT=100ms
-      - LOCATION_TTL=120s
-      - ORDER_COURIER_MAPPING_TTL=1h
-      - HEARTBEAT_TTL=90s
-      - LEADER_LOCK_TTL=25s
-      - LEADER_RENEW_INTERVAL=10s
-      - CIRCUIT_BREAKER_MAX_FAILURES=5
-      - CIRCUIT_BREAKER_TIMEOUT=15s
-      - PPROF_ENABLED=true
-      - BLOCK_PROFILE_RATE=10000
-      - MUTEX_PROFILE_FRACTION=5
-    healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://localhost:8080/health/ready || exit 1"]
-      interval: 5s
-      timeout: 3s
-      retries: 3
-      start_period: 2s
+  redis-exporter:
+    image: "oliver006/redis_exporter"
+    container_name: redis_exp 
+    ports: 
+      - "9121:9121"
     depends_on:
       redis:
         condition: service_healthy
-    networks:
-      - courier-net
+  
+  # courier-service:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile
+  #   container_name: courier-location-service
+  #   ports:
+  #     - "8080:8080"
+  #   environment:
+  #     - SERVER_PORT=8080
+  #     - REDIS_ADDR=redis:6379
+  #     - ORDERS_FILE_PATH=orders.yml
+  #     - POLL_INTERVAL=30s
+  #     - WORKER_CONCURRENCY=10
+  #     - SLA_LIMIT=100ms
+  #     - LOCATION_TTL=120s
+  #     - ORDER_COURIER_MAPPING_TTL=1h
+  #     - HEARTBEAT_TTL=90s
+  #     - LEADER_LOCK_TTL=25s
+  #     - LEADER_RENEW_INTERVAL=10s
+  #     - CIRCUIT_BREAKER_MAX_FAILURES=5
+  #     - CIRCUIT_BREAKER_TIMEOUT=15s
+  #     - PPROF_ENABLED=true
+  #     - BLOCK_PROFILE_RATE=10000
+  #     - MUTEX_PROFILE_FRACTION=5
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "wget -q --spider http://localhost:8080/health/ready || exit 1"]
+  #     interval: 5s
+  #     timeout: 3s
+  #     retries: 3
+  #     start_period: 2s
+  #   depends_on:
+  #     redis:
+  #       condition: service_healthy
+  #   networks:
+  #     - courier-net
+  #   restart: unless-stopped
+
+  victoria:
+    image: "victoriametrics/victoria-metrics"
+    container_name: prom
+    environment:
+      - no_proxy=localhost,127.0.0.1,victoria,grafana,sensu,172.*
+      - NO_PROXY=localhost,127.0.0.1,victoria,grafana,sensu,172.*
+    command:
+      - -promscrape.config=/etc/prometheus/prometheus.yml
+      - --loggerLevel=INFO
+    ports: 
+      - "8428:8428"
+    volumes:
+      - ./out/victoria-metrics-data:/victoria-metrics-data
+      - ./out/prometheus:/etc/prometheus
+
+  grafana:
+    image: grafana/grafana-enterprise
+    container_name: grafana
+    environment:
+      - no_proxy=localhost,127.0.0.1,victoria,sensu,172.*
+      - NO_PROXY=localhost,127.0.0.1,victoria,sensu,172.*
+      - GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=sensu-go-datasource
     restart: unless-stopped
+    user: '0'
+    ports:
+     - '4000:3000'
+    volumes:
+      - ./out/.grafana-storage:/var/lib/grafana
 
 volumes:
   redis_data:

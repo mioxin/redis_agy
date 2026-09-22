@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"time"
 
@@ -20,12 +21,14 @@ import (
 // 3. "tracking:active_orders" (Set of order IDs)  : List of orders currently being polled by PollerWorker.
 // 4. "tracking:order:%d:heartbeat" (String, TTL=90s): Sliding-window heartbeat; when expired, order is purged from active set.
 // 5. "courier_poller:last_sync" (String, RFC3339) : Global timestamp of the last successful batch polling cycle.
+// 6. "courier_poller:prewarmed" (String)        : Multi-pod coordination flag set after first startup pre-warm.
 const (
 	keyPrefixLocation  = "order:%d:location"
 	keyPrefixCourier   = "order:%d:courier_id"
 	keyActiveOrders    = "tracking:active_orders"
 	keyOrderHeartbeat  = "tracking:order:%d:heartbeat"
 	keyPollerLastSync  = "courier_poller:last_sync"
+	keyPreWarmed       = "courier_poller:prewarmed"
 )
 
 // RedisCacheRepository implements LocationCacheRepository using Redis.
@@ -306,5 +309,60 @@ end`
 		return fmt.Errorf("release leader lock %q: %w", key, err)
 	}
 	return nil
+}
+
+// PreWarmOrders atomically registers a batch of orders in the active tracking set,
+// initializes their heartbeats, and caches order->courier mappings in a single Redis Pipeline.
+// This is the single write entrypoint for cache pre-warming at startup (ADR-002).
+func (r *RedisCacheRepository) PreWarmOrders(ctx context.Context, orders []domain.Order, heartbeatTTL time.Duration, mappingTTL time.Duration) error {
+	if len(orders) == 0 {
+		return nil
+	}
+
+	pipe := r.client.Pipeline()
+
+	for _, o := range orders {
+		pipe.SAdd(ctx, keyActiveOrders, o.ID)
+
+		heartbeatKey := fmt.Sprintf(keyOrderHeartbeat, o.ID)
+		pipe.Set(ctx, heartbeatKey, "1", heartbeatTTL)
+
+		courierKey := fmt.Sprintf(keyPrefixCourier, o.ID)
+		pipe.Set(ctx, courierKey, strconv.FormatInt(o.CourierID, 10), mappingTTL)
+	}
+
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("redis pre-warm orders pipeline: %w", err)
+	}
+
+	slog.Info("Pre-warmed cache for orders",
+		slog.Int("order_count", len(orders)),
+		slog.Duration("heartbeat_ttl", heartbeatTTL),
+		slog.Duration("mapping_ttl", mappingTTL),
+	)
+
+	return nil
+}
+
+// SetPreWarmed sets the multi-pod coordination flag so subsequent replicas skip pre-warming.
+// Test-only flag; not required in production deployments.
+func (r *RedisCacheRepository) SetPreWarmed(ctx context.Context) error {
+	if err := r.client.Set(ctx, keyPreWarmed, "1", 0).Err(); err != nil {
+		return fmt.Errorf("redis set prewarmed flag: %w", err)
+	}
+	return nil
+}
+
+// IsPreWarmed reports whether the pre-warm coordination flag has been set by a prior replica.
+// Test-only flag; not required in production deployments.
+func (r *RedisCacheRepository) IsPreWarmed(ctx context.Context) (bool, error) {
+	val, err := r.client.Get(ctx, keyPreWarmed).Result()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return false, nil
+		}
+		return false, fmt.Errorf("redis get prewarmed flag: %w", err)
+	}
+	return val == "1", nil
 }
 

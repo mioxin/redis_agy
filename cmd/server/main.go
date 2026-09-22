@@ -134,7 +134,34 @@ func main() {
 	locationService := service.NewLocationService(cacheRepo, pollerService, cfg)
 
 	// =========================================================================
-	// 6. Запуск фонового воркера (PollerWorker)
+	// 6. Cache Pre-Warming (ADR-002)
+	// Перед запуском воркера загружаем все заказы из orders.yml в кэш.
+	// Используем флаг для координации между подами: первый запущенный под
+	// выполнит предзагрузку, остальные увидят флаг и пропустят.
+	// =========================================================================
+	prewarmCtx, prewarmCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	prewarmed, err := cacheRepo.IsPreWarmed(prewarmCtx)
+	if err != nil {
+		slog.Warn("Failed to check pre-warmed flag, proceeding with pre-warm", slog.String("error", err.Error()))
+		prewarmed = false
+	}
+	if !prewarmed {
+		slog.Info("Cache not pre-warmed, starting pre-warm")
+		if err := pollerService.PreWarmCache(prewarmCtx); err != nil {
+			slog.Error("Cache pre-warm failed", slog.String("error", err.Error()))
+		} else {
+			slog.Info("Cache pre-warm completed successfully")
+			if err := cacheRepo.SetPreWarmed(prewarmCtx); err != nil {
+				slog.Warn("Failed to set pre-warmed flag", slog.String("error", err.Error()))
+			}
+		}
+	} else {
+		slog.Info("Cache already pre-warmed by another replica, skipping")
+	}
+	prewarmCancel()
+
+	// =========================================================================
+	// 7. Запуск фонового воркера (PollerWorker)
 	// =========================================================================
 	// Включает:
 	// - Контур Distributed Leader Election (только 1 pod-лидер опрашивает апстримы)

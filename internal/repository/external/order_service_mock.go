@@ -134,3 +134,20 @@ func (m *OrderServiceMock) GetOrderByID(ctx context.Context, orderID int64) (*do
 		CourierID: order.CourierID,
 	}, nil
 }
+
+// GetAllOrders returns all orders loaded from orders.yml as a copy-safe slice.
+// Used for cache pre-warming at server startup so that known orders are immediately
+// available in the cache without requiring a client request (Cache Miss avoidance).
+func (m *OrderServiceMock) GetAllOrders() []domain.Order {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	result := make([]domain.Order, 0, len(m.orders))
+	for _, o := range m.orders {
+		result = append(result, domain.Order{
+			ID:        o.ID,
+			CourierID: o.CourierID,
+		})
+	}
+	return result
+}

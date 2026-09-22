@@ -28,6 +28,10 @@ type PollerService interface {
 	SyncOrder(ctx context.Context, orderID int64) error
 	// SyncActiveOrders выполняет пакетный опрос всех активных заказов с дедупликацией курьеров.
 	SyncActiveOrders(ctx context.Context) error
+	// PreWarmCache предзагружает кэш при старте: загружает все заказы из orders.yml,
+	// регистрирует их в active_orders + heartbeats + маппинги, группирует по courier_id,
+	// конкурентно опрашивает Courier Service и пакетно сохраняет локации.
+	PreWarmCache(ctx context.Context) error
 }
 
 // pollerServiceImpl реализует интерфейс PollerService.
@@ -326,4 +330,71 @@ courierLoop:
 
 	wg.Wait()
 	return results
+}
+
+// PreWarmCache предзагружает кэш при старте сервера (ADR-002).
+// Поток:
+// 1. Получает все заказы через orderClient.GetAllOrders().
+// 2. Вызывает cacheRepo.PreWarmOrders() — единая точка записи: active_orders + heartbeats + маппинги.
+// 3. Группирует заказы по courier_id, дедупликует.
+// 4. Конкурентно опрашивает Courier Service через пул воркеров (WorkerConcurrency).
+// 5. Пакетно сохраняет локации через SetOrderLocationsBatch (Pipeline, TTL 120с).
+func (p *pollerServiceImpl) PreWarmCache(ctx context.Context) error {
+	// Шаг 1: Получаем все заказы из orders.yml (источник данных для предзагрузки)
+	allOrders := p.orderClient.GetAllOrders()
+	if len(allOrders) == 0 {
+		slog.Info("No orders to pre-warm")
+		return nil
+	}
+
+	slog.Info("Starting cache pre-warm", slog.Int("order_count", len(allOrders)))
+
+	// Шаг 2: Единая точка записи в кэш — active_orders + heartbeats + маппинги (один Pipeline)
+	if err := p.cacheRepo.PreWarmOrders(ctx, allOrders, p.cfg.HeartbeatTTL, p.cfg.OrderCourierMappingTTL); err != nil {
+		return fmt.Errorf("pre-warm orders cache: %w", err)
+	}
+
+	// Шаг 3: Группируем заказы по courier_id (дедупликация курьеров)
+	courierToOrders := make(map[int64][]int64)
+	for _, o := range allOrders {
+		courierToOrders[o.CourierID] = append(courierToOrders[o.CourierID], o.ID)
+	}
+
+	uniqueCouriers := make([]int64, 0, len(courierToOrders))
+	for cID := range courierToOrders {
+		uniqueCouriers = append(uniqueCouriers, cID)
+	}
+
+	// Шаг 4: Конкурентно опрашиваем Courier Service с семафором WorkerConcurrency
+	courierCoordinates := p.fetchCourierCoordinatesConcurrently(ctx, uniqueCouriers)
+
+	// Шаг 5: Формируем пачку локаций и пакетно сохраняем
+	now := time.Now().UTC()
+	locations := make([]domain.CourierLocation, 0, len(allOrders))
+
+	for cID, coords := range courierCoordinates {
+		for _, oID := range courierToOrders[cID] {
+			locations = append(locations, domain.CourierLocation{
+				OrderID:   oID,
+				CourierID: cID,
+				Latitude:  coords.Latitude,
+				Longitude: coords.Longitude,
+				UpdatedAt: now,
+			})
+		}
+	}
+
+	if len(locations) > 0 {
+		if err := p.cacheRepo.SetOrderLocationsBatch(ctx, locations, p.cfg.LocationTTL); err != nil {
+			return fmt.Errorf("batch setting pre-warm locations: %w", err)
+		}
+	}
+
+	slog.Info("Cache pre-warm completed",
+		slog.Int("orders_pre_warmed", len(allOrders)),
+		slog.Int("unique_couriers_polled", len(uniqueCouriers)),
+		slog.Int("locations_saved", len(locations)),
+	)
+
+	return nil
 }

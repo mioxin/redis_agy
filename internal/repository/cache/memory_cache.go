@@ -3,6 +3,7 @@ package cache
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -35,6 +36,7 @@ type MemoryCacheRepository struct {
 	activeOrders map[int64]time.Time // orderID -> heartbeat expiresAt
 	lastSync     time.Time
 	leaderLocks  map[string]memoryLock
+	preWarmed    bool
 }
 
 // NewMemoryCacheRepository initializes a new MemoryCacheRepository.
@@ -252,5 +254,50 @@ func (m *MemoryCacheRepository) ReleaseLeaderLock(ctx context.Context, key strin
 		delete(m.leaderLocks, key)
 	}
 	return nil
+}
+
+// PreWarmOrders registers a batch of orders in the active tracking set with heartbeats
+// and caches order->courier mappings in a single atomic critical section.
+func (m *MemoryCacheRepository) PreWarmOrders(ctx context.Context, orders []domain.Order, heartbeatTTL time.Duration, mappingTTL time.Duration) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	now := time.Now()
+	var heartbeatExp time.Time
+	if heartbeatTTL > 0 {
+		heartbeatExp = now.Add(heartbeatTTL)
+	}
+	var mappingExp time.Time
+	if mappingTTL > 0 {
+		mappingExp = now.Add(mappingTTL)
+	}
+
+	for _, o := range orders {
+		m.activeOrders[o.ID] = heartbeatExp
+		m.courierMaps[o.ID] = memoryItem{
+			value:     o.CourierID,
+			expiresAt: mappingExp,
+		}
+	}
+
+	slog.Info("Pre-warmed memory cache for orders", slog.Int("order_count", len(orders)))
+	return nil
+}
+
+// SetPreWarmed marks the repository as pre-warmed (multi-pod coordination flag).
+func (m *MemoryCacheRepository) SetPreWarmed(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.preWarmed = true
+	return nil
+}
+
+// IsPreWarmed reports whether the pre-warm flag has been set.
+func (m *MemoryCacheRepository) IsPreWarmed(ctx context.Context) (bool, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	return m.preWarmed, nil
 }
 

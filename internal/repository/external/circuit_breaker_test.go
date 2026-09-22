@@ -24,6 +24,10 @@ func (m *mockFailingOrderService) GetOrderByID(ctx context.Context, orderID int6
 	return &domain.Order{ID: orderID, CourierID: 101}, nil
 }
 
+func (m *mockFailingOrderService) GetAllOrders() []domain.Order {
+	return nil
+}
+
 func TestCircuitBreakerOrderService_TripsAndRecovers(t *testing.T) {
 	mockSvc := &mockFailingOrderService{}
 	mockSvc.fail.Store(true)
