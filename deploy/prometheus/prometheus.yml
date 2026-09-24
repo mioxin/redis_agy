@@ -1,0 +1,30 @@
+global:
+  scrape_interval: 5s
+  scrape_timeout: 4s
+  evaluation_interval: 5s
+
+scrape_configs:
+  # 1. Метрики сервиса Courier Location Service (запущен локально на host:8080)
+  - job_name: "courier-service"
+    metrics_path: "/metrics"
+    static_configs:
+      - targets: ["host.docker.internal:8080"]
+        labels:
+          app: "courier-location-service"
+          instance: "localhost:8080"
+          env: "local"
+
+  # 2. Метрики Redis (redis_exporter)
+  - job_name: "redis"
+    static_configs:
+      - targets: ["redis-exporter:9121"]
+        labels:
+          app: "redis"
+          env: "production"
+
+  # 3. Собственные метрики хранилища Victoria Metrics
+  - job_name: "victoriametrics"
+    static_configs:
+      - targets: ["localhost:8428"]
+        labels:
+          app: "victoriametrics"

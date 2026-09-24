@@ -1,0 +1,15 @@
+# Grafana Dashboards Provider Configuration
+apiVersion: 1
+
+providers:
+  - name: "Courier Location Service Dashboards"
+    orgId: 1
+    folder: "Courier Service"
+    type: file
+    disableDeletion: false
+    editable: true
+    updateIntervalSeconds: 10
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

@@ -320,7 +320,8 @@ redis_agy/
 ├── docker-compose.yml                      # Оркестрация с healthcheck
 ├── task2.md                                # Спецификация задач Итерации №2
 ├── docs/
-│   ├── SYSTEM_DESIGN.md                    # Полный системный дизайн
+│   ├── ARCHITECTURE_AND_OPERATION.md       # Полное руководство по архитектуре и онбордингу
+│   ├── SYSTEM_DESIGN.md                    # Полный системный дизайн и ADR
 │   └── PROFILING_GUIDE.md                  # Пошаговое руководство по профилированию pprof
 ```
 
@@ -348,6 +349,7 @@ curl -i http://localhost:8080/orders/1/courier-location
 ## 9. Детальная документация
 
 Детальное описание архитектурных решений, математики задержек, профилирования и диаграмм взаимодействий доступно в:  
-- 👉 [**Системный дизайн и архитектурная спецификация (`docs/SYSTEM_DESIGN.md`)**](file:///home/mmm/dev/redis_agy/docs/SYSTEM_DESIGN.md)  
-- 👉 [**Пошаговое руководство по профилированию `pprof` (`docs/PROFILING_GUIDE.md`)**](file:///home/mmm/dev/redis_agy/docs/PROFILING_GUIDE.md)  
+- 👉 [**Полное руководство по архитектуре и устройству сервиса (`docs/ARCHITECTURE_AND_OPERATION.md`)**](file:///home/mmm/dev/redis_agy/docs/ARCHITECTURE_AND_OPERATION.md) — идеальная стартовая точка для быстрого погружения с нуля, подробные C4-диаграммы, диаграммы последовательностей и FAQ.
+- 👉 [**Системный дизайн и архитектурная спецификация (`docs/SYSTEM_DESIGN.md`)**](file:///home/mmm/dev/redis_agy/docs/SYSTEM_DESIGN.md) — детальные ADR, расчет задержек, бенчмарки и спецификации хранилища.
+- 👉 [**Пошаговое руководство по профилированию `pprof` (`docs/PROFILING_GUIDE.md`)**](file:///home/mmm/dev/redis_agy/docs/PROFILING_GUIDE.md) — инструкция по сбору CPU, памяти, трейсов и mutex профилей.
 

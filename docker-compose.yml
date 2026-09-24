@@ -6,7 +6,7 @@ services:
       - "6379:6379"
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
-      - redis_data:/data
+      - ./out/redis_data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -21,6 +21,10 @@ services:
     container_name: redis_exp 
     ports: 
       - "9121:9121"
+    environment:
+      - REDIS_ADDR=redis:6379
+    networks:
+      - courier-net
     depends_on:
       redis:
         condition: service_healthy
@@ -73,9 +77,13 @@ services:
       - --loggerLevel=INFO
     ports: 
       - "8428:8428"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - courier-net
     volumes:
       - ./out/victoria-metrics-data:/victoria-metrics-data
-      - ./out/prometheus:/etc/prometheus
+      - ./deploy/prometheus:/etc/prometheus
 
   grafana:
     image: grafana/grafana-enterprise
@@ -88,8 +96,12 @@ services:
     user: '0'
     ports:
      - '4000:3000'
+    networks:
+      - courier-net
     volumes:
       - ./out/.grafana-storage:/var/lib/grafana
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards
 
 volumes:
   redis_data:
